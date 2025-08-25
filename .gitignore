@@ -4,3 +4,8 @@
 .vscode/launch.json
 .vscode/ipch
 para.cpp
+.qodo
+.dist
+.vscode
+db.json
+secrets.h

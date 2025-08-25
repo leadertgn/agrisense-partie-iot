@@ -1,31 +1,36 @@
 #include <ESP8266WiFi.h>
+#include <DHT.h>
 #include <Firebase_ESP_Client.h>
 #include "time_utils.h"
+#include "secrets.h" 
 // Bibliothèque auxiliaire pour le jeton d'authentification
 #include "addons/TokenHelper.h"  
 #include "addons/RTDBHelper.h" 
 
-// Remplacez par votre propre jeton d'authentification
-#define WIFI_SSID "youpilab_fibre"
-#define WIFI_PASSWORD "i_l@v3_yl2021Fibre"
+// Brochage des capteurs
+#define DHT_PIN 12  // D6 
+#define DHT_TYPE DHT11 
+#define SOIL_MOISTURE_PIN A0
 
-// Firebase
-#define API_KEY "AIzaSyD934rncjxMR41u1KkusSskFs1Neh0FVvI"
-#define DATABASE_URL "https://essai-iot-52c18-default-rtdb.firebaseio.com"
 
-// Auth Firebase
-#define USER_EMAIL "espuser@gmail.com"
-#define USER_PASSWORD "monpassword123"
+
+// Objet DHT 
+DHT dht(DHT_PIN,DHT_TYPE);
 
 // Objet principal Firebase
 FirebaseData fbdo;
 FirebaseAuth auth;
 FirebaseConfig config;
 
-// Fonction d'initialisation du timestamp en-tête 
+// En-tête des fonctions
 void initializeTimestamp();
+void streamCallback(FirebaseStream data);
+void streamTimeoutCallback(bool timeout);
+
+// setup
 void setup() {
   Serial.begin(115200);
+  dht.begin();
 
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   Serial.print("Connexion au WiFi");
@@ -47,6 +52,12 @@ void setup() {
   // Initialisation Firebase
   Firebase.begin(&config, &auth);
   Firebase.reconnectWiFi(true);
+  //Démarrage de l'écoute 
+  if(!Firebase.RTDB.beginStream(&fbdo,"cultures/dernieres_mesures")){
+    Serial.println("Echec stream : " + fbdo.errorReason());
+  }
+  // Initialisation de l'écoute avec les callbacks 
+  Firebase.RTDB.setStreamCallback(&fbdo,streamCallback,streamTimeoutCallback);
   // Initialisation du serveur NTP
   initializeTimestamp();
 
@@ -59,10 +70,31 @@ void loop() {
     Serial.println(ts);
     delay(5000);
   }
-
+  else {
+    Serial.println("Firebase non prêt !");
+  }
 }
 
 void initializeTimestamp() {
   initTime(); // initialisation NTP
   waitForNTP(); // attente synchro NTP
+}
+
+void streamCallback(FirebaseStream data) {
+  Serial.println("Données reçues depuis Firebase !");
+  Serial.print("Chemin écouté :");
+  Serial.println(data.streamPath());
+  Serial.print("Valeur : ");
+  Serial.println(data.stringData());
+  Serial.print("Chemin de la donnée changée : ");
+  Serial.println(data.dataPath());
+}
+
+void streamTimeoutCallback(bool timeout) {
+  if(timeout){
+    Serial.println("Timeout du stream !");
+  }
+  if(!fbdo.httpConnected()) {
+    Serial.println("Erreur : " + fbdo.errorReason());
+  }
 }
