@@ -1,64 +1,63 @@
 #include <ESP8266WiFi.h>
 #include <DHT.h>
 #include <Firebase_ESP_Client.h>
-#include "time_utils.h"
-#include "secrets.h" 
-#include "certs.h"
+#include <ArduinoJson.h>
+#include "secrets.h"  // Contient WIFI_SSID, WIFI_PASSWORD, API_KEY, DATABASE_URL, USER_EMAIL, USER_PASSWORD
+#include "time_utils.h" // Pour NTP et timestamp ISO 8601
 
-// Bibliothèque auxiliaire pour le jeton d'authentification
-#include "addons/TokenHelper.h"  
-#include "addons/RTDBHelper.h" 
-
-// Brochage des capteurs
-#define DHT_PIN 12  // D6 
-#define DHT_TYPE DHT11 
-#define SOIL_MOISTURE_PIN A0
-
-
-// Brochage des actionneurs et état
-
+// Broches
+#define DHT_PIN 12 // D6
+#define DHT_TYPE DHT11
 #define RELAY_PIN 14 // D5
-bool RELAY_STATE = false;
-// Objet DHT 
-DHT dht(DHT_PIN,DHT_TYPE);
 
-// Objet principal Firebase
+// Capteur et relais
+DHT dht(DHT_PIN, DHT_TYPE);
+bool RELAY_STATE = false;
+
+// Firebase
 FirebaseData fbdo;
 FirebaseAuth auth;
 FirebaseConfig config;
 
-// En-tête des fonctions
-void initializeTimestamp();
-void streamCallback(FirebaseStream data);
-void streamTimeoutCallback(bool timeout);
-void getInitialRelayState();
+// -----------------
+// Fonctions
+// -----------------
+String collectSensorData();
+void sendToFirebase(String path, String jsonData);
 void checkWiFiConnection();
-// setup
+String getISOTime();
+
+// -----------------
+// Setup
+// -----------------
 void setup() {
   Serial.begin(115200);
   dht.begin();
   pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, HIGH); // Fermé par défaut
+  digitalWrite(RELAY_PIN, HIGH); // Relais fermé par défaut
 
+  // Connexion WiFi
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   Serial.print("Connexion au WiFi");
   while (WiFi.status() != WL_CONNECTED) {
       delay(500);
       Serial.print(".");
   }
-  Serial.println("\nWiFi connecté");
-  Serial.print("Adresse IP : ");
-  Serial.println(WiFi.localIP());
-   // Configuration Firebase
+  Serial.println("\nWiFi connecté : " + WiFi.localIP().toString());
+
+  // Initialisation NTP
+  initTime();  
+  waitForNTP();
+  Serial.println("Heure synchronisée : " + getIsoUtcTime());
+
+  // Config Firebase
   config.api_key = API_KEY;
   config.database_url = DATABASE_URL;
-  config.cert.data = FIREBASE_ROOT_CA;
+  config.cert.data = NULL; // Optionnel, pour SSL
+  //config.cert.data = FIREBASE_ROOT_CA; // Certificat SSL pour sécurité
+  auth.user.email = USER_EMAIL;
+  auth.user.password = USER_PASSWORD;
 
-   // Auth Email/Password
-   auth.user.email = USER_EMAIL;
-   auth.user.password = USER_PASSWORD;
-  
-  // Initialisation Firebase
   Firebase.begin(&config, &auth);
   Firebase.reconnectNetwork(true);
 
@@ -66,98 +65,86 @@ void setup() {
   int attempts = 0;
   while (!Firebase.ready() && attempts < 10) {
     delay(1000);
-    attempts++;
     Serial.print(".");
+    attempts++;
   }
-  if(Firebase.ready()) {
-    getInitialRelayState();
-    
-    Serial.println("Démarrage de l'écoute");
-    if(!Firebase.RTDB.beginStream(&fbdo,"cultures/dernieres_mesures/etat_electrovanne")){
-      Serial.println("Echec stream : " + fbdo.errorReason());
-    }
-    Firebase.RTDB.setStreamCallback(&fbdo,streamCallback,streamTimeoutCallback);
+  if (Firebase.ready()) {
+    Serial.println("\nFirebase prêt !");
   } else {
-    Serial.println("Échec de la connexion Firebase" + fbdo.errorReason());
+    Serial.println("\nErreur connexion Firebase : " + fbdo.errorReason());
   }
-
-  initializeTimestamp();
-
 }
 
+// -----------------
+// Loop
+// -----------------
 void loop() {
-  checkWiFiConnection();  // Vérifier WiFi régulièrement
-  
-  if(Firebase.ready()){
-    Serial.println("Firebase prêt !");
-    String ts = getIsoUtcTime();
-    Serial.println(ts);
-  }
-  else {
+  checkWiFiConnection();
+
+  if (Firebase.ready()) {
+    String jsonData = collectSensorData();
+    Serial.println("JSON généré : " + jsonData);
+
+    sendToFirebase("/test_data", jsonData);
+    delay(10000); // toutes les 10 secondes
+  } else {
     Serial.println("Firebase non prêt !");
-    Serial.printf("Mémoire libre: %d bytes\n", ESP.getFreeHeap());
-  }
-  delay(5000);
-}
-
-void initializeTimestamp() {
-  initTime(); // initialisation NTP
-  waitForNTP(); // attente synchro NTP
-}
-
-void streamCallback(FirebaseStream data) {
-  Serial.println("\n=== Données reçues depuis Firebase ===");
-  Serial.print("Chemin écouté complet: ");
-  Serial.println(data.streamPath());
-  Serial.print("Type de donnée: ");
-  Serial.println(data.dataType());
-  Serial.print("Valeur: ");
-  Serial.println(data.stringData());
-  
-  // Maintenant on reçoit directement la valeur booléenne
-  if(data.dataType() == "boolean"){
-    RELAY_STATE = data.boolData();
-    digitalWrite(RELAY_PIN, RELAY_STATE ? LOW : HIGH);
-    Serial.print("Nouvel état de l'électrovanne : ");
-    Serial.println(RELAY_STATE ? "OUVERT" : "FERME");
-    Serial.println("=== Changement appliqué ===");
-  }
-  else {
-    Serial.println("=== Type de donnée inattendu ===");
+    delay(5000);
   }
 }
 
-void streamTimeoutCallback(bool timeout) {
-  if(timeout){
-    Serial.println("Timeout du stream !");
+// -----------------
+// Fonctions
+// -----------------
+
+String collectSensorData() {
+  float temperature = dht.readTemperature();
+  float humidity = dht.readHumidity();
+
+  if (isnan(temperature) || isnan(humidity)) {
+      Serial.println("Erreur lecture DHT !");
+      temperature = 0;
+      humidity = 0;
   }
-  if(!fbdo.httpConnected()) {
-    Serial.println("Erreur : " + fbdo.errorReason());
-  }
+
+  DynamicJsonDocument doc(256);
+  doc["temperature"] = temperature;
+  doc["humidite"] = humidity;
+  doc["timestamp"] = getIsoUtcTime(); // Timestamp ISO 8601
+
+  String jsonStr;
+  serializeJson(doc, jsonStr);
+  return jsonStr;
 }
 
-void getInitialRelayState(){
-  if(Firebase.RTDB.getBool(&fbdo,"cultures/dernieres_mesures/etat_electrovanne")){
-    if(fbdo.dataType() == "boolean"){
-      bool initial_state = fbdo.boolData();
-      RELAY_STATE = initial_state;
-      digitalWrite(RELAY_PIN, RELAY_STATE ? LOW : HIGH);
-      Serial.print("Etat initial de l'électrovanne : ");
-      Serial.println(RELAY_STATE ? "OUVERT" : "FERME");
-      Serial.print("Valeur pin: ");
-      int state = digitalRead(RELAY_PIN);
-      Serial.println(state);
-      Serial.print("Etat : ");
-      Serial.println(state == LOW ? "OUVERT" : "FERME");
-    }else{
-      Serial.print("Type de donnée inconnue: ");
-      Serial.println(fbdo.dataType());
-      Serial.print("Valeur reçue: ");
-      Serial.println(fbdo.stringData());
+void sendToFirebase(String path, String jsonData) {
+  // Convertir le JSON string en objet
+  DynamicJsonDocument doc(256);
+  DeserializationError error = deserializeJson(doc, jsonData);
+  if (error) {
+    Serial.println("Erreur parsing JSON : " + String(error.c_str()));
+    return;
+  }
+
+  // Préparer FirebaseJson pour mise à jour partielle
+  FirebaseJson fbJson;
+  JsonObject obj = doc.as<JsonObject>();
+  for (JsonPair kv : obj) {
+    // Ajouter chaque champ individuellement
+    if (kv.value().is<float>()) {
+      fbJson.set(kv.key().c_str(), kv.value().as<float>());
+    } else if (kv.value().is<bool>()) {
+      fbJson.set(kv.key().c_str(), kv.value().as<bool>());
+    } else {
+      fbJson.set(kv.key().c_str(), kv.value().as<String>());
     }
-  }else{
-    Serial.print("Erreur lors de la récupération: ");
-    Serial.println(fbdo.errorReason());
+  }
+
+  // Envoyer la mise à jour sans écraser les autres champs
+  if (Firebase.RTDB.updateNode(&fbdo, path.c_str(), &fbJson)) {
+    Serial.println("Données envoyées avec succès !");
+  } else {
+    Serial.println("Erreur d'envoi : " + fbdo.errorReason());
   }
 }
 
@@ -169,3 +156,4 @@ void checkWiFiConnection() {
     delay(3000);
   }
 }
+
