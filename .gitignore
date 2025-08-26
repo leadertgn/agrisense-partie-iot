@@ -9,3 +9,4 @@ para.cpp
 .vscode
 db.json
 secrets.h
+certs.h
