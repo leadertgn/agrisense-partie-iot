@@ -24,7 +24,7 @@ FirebaseConfig config;
 // -----------------
 //String collectSensorData();
 void checkWiFiConnection();
-//void sendAllData(float temperature, float humiditeAir, float humiditeSol);
+void sendAllData(float temperature, float humiditeAir, float humiditeSol);
 
 // -----------------
 // Setup
