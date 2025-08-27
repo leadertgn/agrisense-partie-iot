@@ -22,10 +22,9 @@ FirebaseConfig config;
 // -----------------
 // Fonctions
 // -----------------
-String collectSensorData();
-void sendToFirebase(String path, String jsonData);
+//String collectSensorData();
 void checkWiFiConnection();
-String getISOTime();
+//void sendAllData(float temperature, float humiditeAir, float humiditeSol);
 
 // -----------------
 // Setup
@@ -82,11 +81,7 @@ void loop() {
   checkWiFiConnection();
 
   if (Firebase.ready()) {
-    String jsonData = collectSensorData();
-    Serial.println("JSON généré : " + jsonData);
 
-    sendToFirebase("/test_data", jsonData);
-    delay(10000); // toutes les 10 secondes
   } else {
     Serial.println("Firebase non prêt !");
     delay(5000);
@@ -97,56 +92,59 @@ void loop() {
 // Fonctions
 // -----------------
 
-String collectSensorData() {
-  float temperature = dht.readTemperature();
-  float humidity = dht.readHumidity();
+void sendAllData(float temperature, float humiditeAir, float humiditeSol) {
+    String timestamp = getIsoUtcTime();
 
-  if (isnan(temperature) || isnan(humidity)) {
-      Serial.println("Erreur lecture DHT !");
-      temperature = 0;
-      humidity = 0;
-  }
+    FirebaseJson updateJson;
 
-  DynamicJsonDocument doc(256);
-  doc["temperature"] = temperature;
-  doc["humidite"] = humidity;
-  doc["timestamp"] = getIsoUtcTime(); // Timestamp ISO 8601
+    // ----- Dernières mesures (sans toucher à etat_electrovanne) -----
+    FirebaseJson lastMeasures;
+    lastMeasures.set("temperature", temperature);
+    lastMeasures.set("humidite_air", humiditeAir);
+    lastMeasures.set("humidite_sol", humiditeSol);
+    lastMeasures.set("timestamp", timestamp);
+    updateJson.set("cultures/dernieres_mesures", lastMeasures);
 
-  String jsonStr;
-  serializeJson(doc, jsonStr);
-  return jsonStr;
-}
+    // ----- Historiques -----
+    struct { const char* key; float value; } measures[] = {
+        {"temperature", temperature},
+        {"humidite_air", humiditeAir},
+        {"humidite_sol", humiditeSol}
+    };
 
-void sendToFirebase(String path, String jsonData) {
-  // Convertir le JSON string en objet
-  DynamicJsonDocument doc(256);
-  DeserializationError error = deserializeJson(doc, jsonData);
-  if (error) {
-    Serial.println("Erreur parsing JSON : " + String(error.c_str()));
-    return;
-  }
+    for (int i = 0; i < 3; i++) {
+        String path = String("cultures/historiques/") + measures[i].key;
 
-  // Préparer FirebaseJson pour mise à jour partielle
-  FirebaseJson fbJson;
-  JsonObject obj = doc.as<JsonObject>();
-  for (JsonPair kv : obj) {
-    // Ajouter chaque champ individuellement
-    if (kv.value().is<float>()) {
-      fbJson.set(kv.key().c_str(), kv.value().as<float>());
-    } else if (kv.value().is<bool>()) {
-      fbJson.set(kv.key().c_str(), kv.value().as<bool>());
-    } else {
-      fbJson.set(kv.key().c_str(), kv.value().as<String>());
+        // Lire l'historique actuel
+        FirebaseJsonArray arr;
+        if (Firebase.RTDB.getArray(&fbdo, path)) {
+            arr = fbdo.jsonArray();
+        }
+
+        // Limiter à 10 éléments
+        if (arr.size() >= 10) arr.remove(0);
+        arr.add(measures[i].value);
+
+        // Ajouter au JSON global
+        updateJson.set(path.c_str(), arr);
     }
-  }
 
-  // Envoyer la mise à jour sans écraser les autres champs
-  if (Firebase.RTDB.updateNode(&fbdo, path.c_str(), &fbJson)) {
-    Serial.println("Données envoyées avec succès !");
-  } else {
-    Serial.println("Erreur d'envoi : " + fbdo.errorReason());
-  }
+    // ----- Timestamps -----
+    String tsPath = "cultures/historiques/timestamps";
+    FirebaseJsonArray tsArr;
+    if (Firebase.RTDB.getArray(&fbdo, tsPath)) tsArr = fbdo.jsonArray();
+    if (tsArr.size() >= 10) tsArr.remove(0);
+    tsArr.add(timestamp);
+    updateJson.set(tsPath.c_str(), tsArr);
+
+    // ----- Envoi unique -----
+    if (Firebase.RTDB.updateNode(&fbdo, "/", &updateJson)) {
+        Serial.println("Toutes les données envoyées avec succès !");
+    } else {
+        Serial.println("Erreur envoi global : " + fbdo.errorReason());
+    }
 }
+
 
 void checkWiFiConnection() {
   if (WiFi.status() != WL_CONNECTED) {
