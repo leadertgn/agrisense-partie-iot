@@ -84,7 +84,20 @@ void setup() {
   initializeTimestamp();
 
 }
-
+/*
+============== Flux des données =============
+ A chaque mesures on doit 
+ - Traiter les valeurs des mesures -----> Dans le loop directement 
+ - Appêter la mise à jour (json) du noeud des dernières mesures --------> Une fonction qui reçoit les données traitées et met à jour 
+ - Récupérer json des historiques presentes 
+ - Parcourir et accéder au tableau de chaque champ d'historique
+ - Verifier la taille du tableau
+ - Si taille supérieures à 10 éffacer le premier élément sinon on continue
+ - On ajoute au tableau la nouvelle valeur de mesure 
+ - On regroupe les tableaux au format json comme au départ 
+ - Regrouper les json des dernières mesures et des historiques
+ - Envoyer maintenant le tout à Firebase 
+*/
 void loop() {
   checkWiFiConnection();  // Vérifier WiFi régulièrement
   
