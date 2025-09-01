@@ -15,7 +15,7 @@
 #define SOIL_MOISTURE_PIN A0
 #define RELAY_PIN 14  // D5
 
-const bool TEST_MODE = false;
+const bool TEST_MODE = true;
 const char* BASE_URL = TEST_MODE ? "test_data" : "cultures";
 
 const int HISTORY_SIZE = 10;
@@ -26,7 +26,7 @@ bool RELAY_STATE_CHANGED = false;
 float humidite_air_array[HISTORY_SIZE] = {0};
 float humidite_soil_array[HISTORY_SIZE] = {0};
 float temperature_array[HISTORY_SIZE] = {0};
-char timestamps_array[HISTORY_SIZE][25]; // Tableau de chaînes fixes
+char timestamps_array[HISTORY_SIZE][25];
 
 // Structure de mesure
 struct Measure {
@@ -36,28 +36,31 @@ struct Measure {
 
 // Objets capteur / Firebase
 DHT dht(DHT_PIN, DHT_TYPE);
-FirebaseData fbdo;
+FirebaseData fbdo;        // Pour les requêtes classiques (set/get)
+FirebaseData fbdoStream;  // Pour le streaming
 FirebaseAuth auth;
 FirebaseConfig config;
 
 // ------------------------- VARIABLES GLOBALES -------------------------
 unsigned long lastMeasureTime = 0;
 const unsigned long MEASURE_INTERVAL = 5000;
-unsigned long lastReconnectAttempt = 0;
-const unsigned long RECONNECT_INTERVAL = 30000;
+unsigned long lastStreamCheck = 0;
+const unsigned long STREAM_CHECK_INTERVAL = 10000;
 bool firebaseInitialized = false;
+bool streamStarted = false;
 
 // ------------------------- FONCTIONS -------------------------
 void initializeTimestamp();
 void streamCallback(FirebaseStream data);
 void streamTimeoutCallback(bool timeout);
-void getInitialRelayState();
 void checkWiFiConnection();
 void reconnectWiFi();
 void reconnectFirebase();
 void initializeFirebase();
 void handleRelayStateChange();
 void debugPrint(const String& message);
+void startFirebaseStream();
+void checkStreamConnection();
 
 // ------------------------- DÉBOGAGE -------------------------
 void debugPrint(const String& message) {
@@ -66,8 +69,8 @@ void debugPrint(const String& message) {
 
 // ------------------------- INITIALISATION -------------------------
 void initializeTimestamp() {
-  initTime();    // initialisation NTP
-  waitForNTP();  // attente synchro
+  initTime();
+  waitForNTP();
 }
 
 void reconnectWiFi() {
@@ -84,8 +87,8 @@ void reconnectWiFi() {
 
   if (WiFi.status() == WL_CONNECTED) {
     debugPrint("WiFi reconnecté ! IP: " + WiFi.localIP().toString());
-    // Réinitialiser Firebase après reconnexion WiFi
     firebaseInitialized = false;
+    streamStarted = false;
   } else {
     debugPrint("Impossible de se reconnecter au WiFi. Redémarrage...");
     ESP.restart();
@@ -101,15 +104,17 @@ void initializeFirebase() {
   auth.user.email = USER_EMAIL;
   auth.user.password = USER_PASSWORD;
 
-  // Configuration des timeouts (version corrigée)
-  //config.timeout.serverResponse = 30 * 1000;
-  // La propriété sslRequest n'existe pas, elle a été supprimée
-  
+  // Configuration importante pour le streaming
+  config.timeout.serverResponse = 10 * 1000;
+  config.timeout.tokenGenerationError = 10 * 1000;
+  config.timeout.socketConnection = 10 * 1000;
+  //config.debug = true; // Activer le debug Firebase
+
   Firebase.reconnectNetwork(true);
   Firebase.begin(&config, &auth);
 
   int attempts = 0;
-  while (!Firebase.ready() && attempts < 15) {
+  while (!Firebase.ready() && attempts < 10) {
     delay(1000);
     attempts++;
     Serial.print(".");
@@ -119,22 +124,53 @@ void initializeFirebase() {
     firebaseInitialized = true;
     debugPrint("Firebase initialisé avec succès");
     
-    // Récupérer l'état initial
-    getInitialRelayState();
-    
-    // Démarrer le stream sur le bon chemin
-    String streamPath = String(BASE_URL) + "/dernieres_mesures";
-    debugPrint("Démarrage du stream sur: " + streamPath);
-    
-    if (!Firebase.RTDB.beginStream(&fbdo, streamPath.c_str())) {
-      debugPrint("Échec du début du stream: " + fbdo.errorReason());
-    } else {
-      Firebase.RTDB.setStreamCallback(&fbdo, streamCallback, streamTimeoutCallback);
-      debugPrint("Stream Firebase démarré avec succès");
-    }
+    // Démarrer le stream après un court délai
+    delay(2000);
+    startFirebaseStream();
   } else {
     debugPrint("Échec de l'initialisation Firebase: " + fbdo.errorReason());
     firebaseInitialized = false;
+    streamStarted = false;
+  }
+}
+
+void startFirebaseStream() {
+  if (!Firebase.ready()) {
+    debugPrint("Firebase non prêt, impossible de démarrer le stream");
+    return;
+  }
+  
+  debugPrint("Démarrage du stream Firebase...");
+  String streamPath = String(BASE_URL) + "/dernieres_mesures";
+  
+  // Arrêter le stream existant s'il y en a un
+  if (streamStarted) {
+    Firebase.RTDB.endStream(&fbdoStream);
+    streamStarted = false;
+    delay(1000);
+  }
+  
+  if (!Firebase.RTDB.beginStream(&fbdoStream, streamPath.c_str())) {
+    debugPrint("Échec du début du stream: " + fbdoStream.errorReason());
+    streamStarted = false;
+  } else {
+    Firebase.RTDB.setStreamCallback(&fbdoStream, streamCallback, streamTimeoutCallback);
+    debugPrint("Stream Firebase démarré avec succès sur: " + streamPath);
+    streamStarted = true;
+  }
+}
+
+void checkStreamConnection() {
+  if (!streamStarted || !Firebase.ready()) {
+    debugPrint("Stream non actif, tentative de redémarrage...");
+    startFirebaseStream();
+    return;
+  }
+
+  // IMPORTANT : lire le stream pour garder la connexion vivante
+  if (!Firebase.RTDB.readStream(&fbdoStream)) {
+    debugPrint("Erreur stream: " + fbdoStream.errorReason());
+    streamStarted = false;
   }
 }
 
@@ -161,16 +197,6 @@ void readMeasures(Measure* measures) {
 }
 
 // ------------------------- CONSTRUCTION JSON -------------------------
-FirebaseJson buildMeasuresJson(Measure* measures, int taille) {
-  FirebaseJson json;
-  for (int i = 0; i < taille; i++) {
-    json.add(measures[i].key, measures[i].value);
-  }
-  json.add("timestamp", getIsoUtcTime());
-  json.add("etat_electrovanne", RELAY_STATE);
-  return json;
-}
-
 template <typename T>
 void addMesureToHistory(T history[], int size, T mesure) {
   decalageGauche(history, size);
@@ -203,20 +229,28 @@ FirebaseJson buildHistoryJson() {
 // ------------------------- MISE À JOUR FIREBASE -------------------------
 void updateDataBase(Measure* measures, int taille) {
   if (WiFi.status() == WL_CONNECTED && Firebase.ready()) {
-    // Mettre à jour seulement les mesures
-    FirebaseJson mesuresJson = buildMeasuresJson(measures, taille);
     String path = String(BASE_URL) + "/dernieres_mesures";
     
-    if (Firebase.RTDB.setJSON(&fbdo, path, &mesuresJson)) {
-      debugPrint("Mesures mises à jour avec succès");
-    } else {
-      debugPrint("Erreur update mesures: " + fbdo.errorReason());
+    // Mettre à jour chaque mesure
+    for (int i = 0; i < taille; i++) {
+      String measurePath = path + "/" + measures[i].key;
+      if (!Firebase.RTDB.setFloat(&fbdo, measurePath, measures[i].value)) {
+        debugPrint("Erreur update " + String(measures[i].key) + ": " + fbdo.errorReason());
+      }
     }
 
+    // Mettre à jour le timestamp
+    String timestampPath = path + "/timestamp";
+    if (!Firebase.RTDB.setString(&fbdo, timestampPath, getIsoUtcTime())) {
+      debugPrint("Erreur update timestamp: " + fbdo.errorReason());
+    }
+
+    debugPrint("Mesures mises à jour avec succès");
+    
     // Mettre à jour l'historique moins fréquemment
-    static unsigned long lastHistoryUpdate = 0;
-    if (millis() - lastHistoryUpdate > 30000) { // Toutes les 30 secondes
-      lastHistoryUpdate = millis();
+  //  static unsigned long lastHistoryUpdate = 0;
+   // if (millis() - lastHistoryUpdate > 30000) {
+    //  lastHistoryUpdate = millis();
       
       FirebaseJson historyJson = buildHistoryJson();
       String historyPath = String(BASE_URL) + "/historiques";
@@ -226,7 +260,7 @@ void updateDataBase(Measure* measures, int taille) {
       } else {
         debugPrint("Erreur update historique: " + fbdo.errorReason());
       }
-    }
+   // }
   }
 }
 
@@ -235,43 +269,18 @@ void handleRelayStateChange() {
   if (RELAY_STATE_CHANGED) {
     digitalWrite(RELAY_PIN, RELAY_STATE ? LOW : HIGH);
     debugPrint("État électrovanne changé: " + String(RELAY_STATE ? "OUVERT" : "FERMÉ"));
-    
-    // Confirmer l'état à Firebase
-    if (Firebase.ready()) {
-      String path = String(BASE_URL) + "/dernieres_mesures/etat_electrovanne";
-      if (Firebase.RTDB.setBool(&fbdo, path, RELAY_STATE)) {
-        debugPrint("État électrovanne confirmé dans Firebase");
-      } else {
-        debugPrint("Erreur confirmation état: " + fbdo.errorReason());
-      }
-    }
-    
     RELAY_STATE_CHANGED = false;
-  }
-}
-
-void getInitialRelayState() {
-  String path = String(BASE_URL) + "/dernieres_mesures/etat_electrovanne";
-  if (Firebase.RTDB.getBool(&fbdo, path.c_str())) {
-    if (fbdo.dataType() == "boolean") {
-      RELAY_STATE = fbdo.boolData();
-      digitalWrite(RELAY_PIN, RELAY_STATE ? LOW : HIGH);
-      debugPrint("État initial électrovanne: " + String(RELAY_STATE ? "OUVERT" : "FERMÉ"));
-    } else {
-      debugPrint("Type de données inattendu: " + String(fbdo.dataType()));
-    }
-  } else {
-    debugPrint("Erreur récupération état relais: " + fbdo.errorReason());
   }
 }
 
 // ------------------------- CALLBACKS STREAM -------------------------
 void streamCallback(FirebaseStream data) {
-  debugPrint("Données reçues depuis Firebase");
+  debugPrint("=== DONNÉES STREAM REÇUES ===");
   debugPrint("Chemin: " + data.streamPath());
   debugPrint("DataPath: " + data.dataPath());
   debugPrint("Type: " + data.dataType());
   debugPrint("Valeur: " + data.stringData());
+  debugPrint("=============================");
 
   // Vérifier si c'est bien le champ etat_electrovanne qui a changé
   if (data.dataPath() == "/etat_electrovanne") {
@@ -281,7 +290,7 @@ void streamCallback(FirebaseStream data) {
       if (newState != RELAY_STATE) {
         RELAY_STATE = newState;
         RELAY_STATE_CHANGED = true;
-        debugPrint("Nouvel état reçu: " + String(newState ? "OUVERT" : "FERMÉ"));
+        debugPrint("Nouvel état reçu de l'interface: " + String(newState ? "OUVERT" : "FERMÉ"));
       } else {
         debugPrint("État identique reçu, ignoré");
       }
@@ -295,11 +304,12 @@ void streamCallback(FirebaseStream data) {
 
 void streamTimeoutCallback(bool timeout) {
   if (timeout) {
-    debugPrint("Timeout du stream Firebase");
+    debugPrint("⚠️ Timeout du stream Firebase !");
   }
-  if (!fbdo.httpConnected()) {
-    debugPrint("Erreur connexion Firebase: " + fbdo.errorReason());
+  if (!fbdoStream.httpConnected()) {
+    debugPrint("❌ Erreur connexion Firebase: " + fbdoStream.errorReason());
   }
+  streamStarted = false; // Forcer la reconnexion
 }
 
 // ------------------------- GESTION CONNEXION -------------------------
@@ -317,7 +327,7 @@ void checkWiFiConnection() {
 
 void reconnectFirebase() {
   static unsigned long lastAttempt = 0;
-  if (millis() - lastAttempt > RECONNECT_INTERVAL) {
+  if (millis() - lastAttempt > 30000) {
     lastAttempt = millis();
     
     debugPrint("Tentative de reconnexion Firebase...");
@@ -357,11 +367,10 @@ void setup() {
   if (WiFi.status() == WL_CONNECTED) {
     debugPrint("WiFi connecté! IP: " + WiFi.localIP().toString());
     
-    // Initialisation timestamp et Firebase
     initializeTimestamp();
     initializeFirebase();
     
-    // Initialiser les tableaux avec des valeurs par défaut
+    // Initialiser les tableaux
     for (int i = 0; i < HISTORY_SIZE; i++) {
       String ts = getIsoUtcTime();
       strncpy(timestamps_array[i], ts.c_str(), 24);
@@ -377,9 +386,17 @@ void setup() {
 void loop() {
   checkWiFiConnection();
   
-  // Gérer la reconnexion Firebase si nécessaire
+  // Vérifier et reconnecter Firebase si nécessaire
   if (WiFi.status() == WL_CONNECTED && (!Firebase.ready() || !firebaseInitialized)) {
     reconnectFirebase();
+  }
+
+  // Vérifier régulièrement l'état du stream
+  if (millis() - lastStreamCheck > STREAM_CHECK_INTERVAL) {
+    lastStreamCheck = millis();
+    if (Firebase.ready()) {
+      checkStreamConnection();
+    }
   }
 
   // Gérer les changements d'état de l'électrovanne
@@ -392,22 +409,26 @@ void loop() {
     Measure measures[3];
     readMeasures(measures);
 
-    // Ajouter à l'historique
     addMesureToHistory(humidite_air_array, HISTORY_SIZE, measures[0].value);
     addMesureToHistory(temperature_array, HISTORY_SIZE, measures[1].value);
     addMesureToHistory(humidite_soil_array, HISTORY_SIZE, measures[2].value);
 
-    // Mise à jour du timestamp
     String ts = getIsoUtcTime();
     decalageGauche(timestamps_array, HISTORY_SIZE);
     strncpy(timestamps_array[HISTORY_SIZE - 1], ts.c_str(), 24);
 
-    // Mise à jour Firebase si connecté
     if (Firebase.ready()) {
       updateDataBase(measures, 3);
     }
   }
 
-  // Petite pause pour éviter de surcharger le CPU
+  // Lire le stream en continu (indispensable pour garder la connexion vivante)
+  if (streamStarted) {
+    if (!Firebase.RTDB.readStream(&fbdoStream)) {
+      debugPrint("Erreur stream loop: " + fbdoStream.errorReason());
+      streamStarted = false;
+    }
+  }
+
   delay(100);
 }
