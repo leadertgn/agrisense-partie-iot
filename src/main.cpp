@@ -239,6 +239,7 @@ void updateDataBase(Measure* measures, int taille) {
     for (int i = 0; i < taille; i++) {
       json.set(measures[i].key, measures[i].value);
     }
+    json.set("etat_electrovanne", RELAY_STATE);  
     json.set("timestamp", getIsoUtcTime());
     
     if (Firebase.RTDB.setJSON(&fbdo, path.c_str(), &json)) {
