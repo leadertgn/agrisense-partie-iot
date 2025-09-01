@@ -15,7 +15,7 @@
 #define SOIL_MOISTURE_PIN A0
 #define RELAY_PIN 14  // D5
 
-const bool TEST_MODE = true;
+const bool TEST_MODE = false;
 const char* BASE_URL = TEST_MODE ? "test_data" : "cultures";
 
 const int HISTORY_SIZE = 10;
@@ -248,9 +248,9 @@ void updateDataBase(Measure* measures, int taille) {
     debugPrint("Mesures mises à jour avec succès");
     
     // Mettre à jour l'historique moins fréquemment
-  //  static unsigned long lastHistoryUpdate = 0;
-   // if (millis() - lastHistoryUpdate > 30000) {
-    //  lastHistoryUpdate = millis();
+    static unsigned long lastHistoryUpdate = 0;
+    if (millis() - lastHistoryUpdate > 10000) {
+      lastHistoryUpdate = millis();
       
       FirebaseJson historyJson = buildHistoryJson();
       String historyPath = String(BASE_URL) + "/historiques";
@@ -260,7 +260,7 @@ void updateDataBase(Measure* measures, int taille) {
       } else {
         debugPrint("Erreur update historique: " + fbdo.errorReason());
       }
-   // }
+    }
   }
 }
 
