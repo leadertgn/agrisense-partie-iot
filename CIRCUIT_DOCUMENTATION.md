@@ -1,16 +1,18 @@
 ## 1. Vue d'ensemble
-Ce projet vise à créer un système de surveillance et de contrôle intelligent pour l'agriculture, permettant de mesurer l'humidité de l'air, la température, et l'humidité du sol. Il intègre un module relais pour contrôler un dispositif d'irrigation (comme une électrovanne). L'architecture repose sur un microcontrôleur ESP8266 qui collecte les données des capteurs et les transmet en temps réel à une base de données Firebase. Le système peut également recevoir des commandes de Firebase pour activer ou désactiver le relais, offrant ainsi un contrôle à distance.
+
+Ce projet vise à automatiser la gestion de l'irrigation et la surveillance environnementale pour les cultures. Il mesure la température, l'humidité de l'air, l'humidité du sol et contrôle un relais (probablement pour une électrovanne ou une pompe) en fonction des données collectées et des commandes reçues via Firebase. L'architecture matérielle repose sur un ESP8266, un capteur DHT et un capteur d'humidité du sol. Le logiciel utilise le framework Arduino, se connecte au WiFi, synchronise l'heure via NTP, et communique avec Firebase Realtime Database pour envoyer des mesures, recevoir des commandes et stocker des historiques.
 
 ## 2. Composants Hardware
-| Composant               | Pin        | Fonction                                   | Notes                                                              |
-| :---------------------- | :--------- | :----------------------------------------- | :----------------------------------------------------------------- |
-| ESP8266 (ESP-12E)       | -          | Microcontrôleur principal                  | Gère la logique, les capteurs, le WiFi et Firebase.                |
-| Capteur DHT11           | GPIO12 (D6) | Mesure la température et l'humidité de l'air | Connecté à la broche numérique D6.                                 |
-| Capteur Humidité du Sol | A0         | Mesure l'humidité du sol                   | Capteur analogique, connecté à la broche analogique A0.            |
-| Module Relais           | GPIO14 (D5) | Contrôle l'électrovanne                    | Connecté à la broche numérique D5.                                 |
+
+| Composant           | Pin ESP8266 | Fonction                               | Notes                                                              |
+| :------------------ | :---------- | :------------------------------------- | :----------------------------------------------------------------- |
+| ESP8266 (ESP-12E)   |             | Microcontrôleur                        | Carte principale                                                   |
+| DHT Sensor          | D6 (GPIO12) | Mesure température et humidité de l'air | Le code spécifie DHT11, mais le composant détecté est DHT22.      |
+| Capteur Humidité Sol| A0          | Mesure l'humidité du sol               | Lecture analogique                                                 |
+| Module Relais       | D5 (GPIO14) | Commande de l'électrovanne/pompe       | Piloté par le GPIO14, LOW active le relais (électrovanne ouverte). |
 
 ## 3. Configuration des Pins
-Le code définit les broches utilisées pour les différents composants :
+
 ```cpp
 #define DHT_PIN 12   // D6
 #define DHT_TYPE DHT11
@@ -19,120 +21,122 @@ Le code définit les broches utilisées pour les différents composants :
 ```
 
 ## 4. Bibliothèques
-Les bibliothèques suivantes sont utilisées dans le projet :
-*   `ESP8266WiFi.h`: Gère la connectivité Wi-Fi de l'ESP8266.
-*   `DHT.h`: Interface avec le capteur DHT11 pour la lecture de la température et de l'humidité de l'air.
-*   `Firebase_ESP_Client.h`: Bibliothèque principale pour interagir avec Firebase Realtime Database.
-*   `time_utils.h`: Fournit des fonctions utilitaires pour l'initialisation et la gestion du temps (NTP) et la génération d'horodatages UTC.
-*   `secrets.h`: Contient les identifiants sensibles (SSID Wi-Fi, mot de passe, clés API Firebase, URL de la base de données, identifiants utilisateur).
-*   `Array_Utils.h`: Bibliothèque utilitaire pour la manipulation de tableaux (non directement visible dans `main.cpp` pour les tableaux globaux, mais peut être utilisée par d'autres fonctions).
-*   `addons/TokenHelper.h`: Aide à la gestion des tokens d'authentification Firebase.
-*   `addons/RTDBHelper.h`: Fournit des fonctions d'aide pour l'utilisation du Realtime Database de Firebase.
+
+| Bibliothèque                 | Rôle                                                                 |
+| :--------------------------- | :------------------------------------------------------------------- |
+| `ESP8266WiFi.h`              | Gestion de la connexion WiFi sur ESP8266.                            |
+| `DHT.h`                      | Interface avec les capteurs DHT (DHT11, DHT22).                      |
+| `Firebase_ESP_Client.h`      | Communication avec Firebase Realtime Database.                       |
+| `"time_utils.h"`             | Fonctions utilitaires pour la gestion du temps et la synchronisation NTP. |
+| `"secrets.h"`                | Stockage des identifiants WiFi et Firebase (non fourni dans l'extrait). |
+| `"Array_Utils.h"`            | Fonctions utilitaires pour la manipulation de tableaux (non fourni). |
+| `addons/TokenHelper.h`       | Gestion des tokens d'authentification Firebase.                      |
+| `addons/RTDBHelper.h`        | Fonctions spécifiques pour Firebase Realtime Database.               |
 
 ## 5. Logique du Code
-Le programme initialise les composants et gère la communication avec Firebase en continu.
 
 *   **`setup()`**:
-    *   Initialise la communication série à 115200 bauds.
-    *   Configure les broches du DHT11, du capteur d'humidité du sol et du relais. Le relais est initialisé en position "fermée" (`HIGH`).
-    *   Établit la connexion Wi-Fi en utilisant les identifiants de `secrets.h`.
-    *   Initialise le temps via NTP (`initializeTimestamp()`) pour des horodatages précis.
-    *   Initialise la connexion à Firebase (`initializeFirebase()`).
-    *   Prépare les tableaux d'historique avec des horodatages initiaux.
+    *   Initialise la communication série (`Serial.begin`).
+    *   Initialise le capteur DHT (`dht.begin()`).
+    *   Configure la broche du relais en sortie et l'initialise à l'état HAUT (relais inactif, électrovanne fermée).
+    *   Configure la broche d'humidité du sol en entrée.
+    *   Tente la connexion au réseau WiFi en utilisant les identifiants de `secrets.h`.
+    *   Si la connexion WiFi réussit :
+        *   Initialise l'heure système via NTP (`initializeTimestamp()`).
+        *   Initialise la connexion à Firebase (`initializeFirebase()`).
+        *   Prépare les tableaux d'historique avec des timestamps initiaux.
+    *   Si la connexion WiFi échoue, redémarre l'ESP8266.
 
 *   **`loop()`**:
-    *   Vérifie et maintient la connexion Wi-Fi (`checkWiFiConnection()`).
-    *   Si la connexion Firebase est perdue, tente de la réinitialiser.
-    *   Vérifie et redémarre le stream Firebase régulièrement (`checkStreamConnection()`) pour écouter les changements.
-    *   Gère les changements d'état du relais (`handleRelayStateChange()`) si une commande est reçue via Firebase.
-    *   À intervalles réguliers (5 secondes, `MEASURE_INTERVAL`), lit les données des capteurs (`readMeasures()`) et les envoie à Firebase (`updateDataBase()`).
-    *   Lit en continu le stream Firebase pour assurer la réactivité aux commandes.
+    *   Vérifie périodiquement la connexion WiFi et tente de la rétablir si nécessaire (`checkWiFiConnection()`).
+    *   Si le WiFi est connecté mais Firebase n'est pas prêt, réinitialise la connexion Firebase (`initializeFirebase()`).
+    *   Vérifie l'état du stream Firebase et tente de le redémarrer si nécessaire (`checkStreamConnection()`).
+    *   Traite les changements d'état du relais demandés par Firebase (`handleRelayStateChange()`).
+    *   Toutes les `MEASURE_INTERVAL` millisecondes (5 secondes) :
+        *   Lit les mesures des capteurs (`readMeasures()`).
+        *   Met à jour les données dans Firebase Realtime Database (`updateDataBase()`).
+    *   Lit en continu le stream Firebase pour recevoir les mises à jour (`Firebase.RTDB.readStream()`).
+    *   Attend brièvement (`delay(50)`) pour éviter de saturer le processeur.
 
-*   **Fonctions critiques**:
-    *   `initializeFirebase()`: Configure les informations d'authentification et de base de données Firebase, puis établit la connexion et démarre le stream.
-    *   `startFirebaseStream()`: Démarre un flux de données en temps réel depuis Firebase pour écouter les changements, notamment l'état de l'électrovanne.
-    *   `streamCallback()`: Fonction de rappel déclenchée par le stream Firebase. Elle met à jour l'état du relais (`RELAY_STATE`) si le champ `/etat_electrovanne` change dans la base de données.
-    *   `readMeasures()`: Lit les valeurs de température et d'humidité de l'air du DHT11, ainsi que l'humidité du sol via la broche analogique A0.
-    *   `updateDataBase()`: Envoie les dernières mesures (température, humidité air/sol, état du relais, horodatage) à la section `/dernieres_mesures` de Firebase. Met également à jour un historique des données dans `/historiques` toutes les 30 secondes.
+*   **Fonctions Critiques**:
+    *   `initializeFirebase()`: Gère la configuration et l'authentification Firebase, y compris la gestion des tokens et le démarrage du stream.
+    *   `startFirebaseStream()`: Démarre l'écoute des changements sur le nœud `dernieres_mesures` dans Firebase.
+    *   `streamCallback()`: Fonction de rappel appelée lors de la réception de données via le stream Firebase. Elle est utilisée pour mettre à jour l'état de l'électrovanne (`RELAY_STATE`).
+    *   `readMeasures()`: Lit les valeurs des capteurs DHT et d'humidité du sol, effectue une mise à l'échelle pour l'humidité du sol et gère les erreurs de lecture du DHT.
+    *   `updateDataBase()`: Envoie les mesures actuelles et l'état du relais à Firebase, et met à jour périodiquement les données d'historique.
+    *   `handleRelayStateChange()`: Applique le changement d'état du relais au GPIO physique lorsque `RELAY_STATE_CHANGED` est vrai.
 
 ## 6. Schéma de Câblage
+
 ```mermaid
 flowchart TD
-    ESP8266["ESP8266 (NodeMCU/ESP-12E)"]
-
-    DHT11["Capteur DHT11"]
-    SOIL["Capteur Humidité Sol"]
-    RELAY["Module Relais"]
-    FIREBASE["Firebase Realtime Database"]
-    WIFI["Réseau WiFi"]
-
-    ESP8266 -- GPIO12 (D6) --> DHT11
-    ESP8266 -- A0 --> SOIL
-    ESP8266 -- GPIO14 (D5) --> RELAY
-
-    ESP8266 -- Connexion --> WIFI
-    WIFI -- Internet --> FIREBASE
-
-    DHT11 -- Mesures Air --> ESP8266
-    SOIL -- Mesures Sol --> ESP8266
-    ESP8266 -- Contrôle --> RELAY
-    ESP8266 -- Envoi Données --> FIREBASE
-    FIREBASE -- Commandes/Stream --> ESP8266
+    ESP8266 --> DHT_PIN["DHT Pin (D6)"]
+    DHT_PIN --> DHT["Capteur DHT"]
+    ESP8266 --> SOIL_MOISTURE_PIN["A0"]
+    SOIL_MOISTURE_PIN --> SOIL["Capteur Humidité Sol"]
+    ESP8266 --> RELAY_PIN["Relay Pin (D5)"]
+    RELAY_PIN --> RELAY["Module Relais"]
+    RELAY --> ELECTROVANNE["Électrovanne / Pompe"]
 ```
 
 ## 7. Installation
-Pour installer et exécuter ce projet, suivez les étapes ci-dessous :
 
-1.  **Installer PlatformIO IDE**: Assurez-vous d'avoir Visual Studio Code avec l'extension PlatformIO IDE installée.
-2.  **Cloner le dépôt**: Ouvrez un terminal et clonez le dépôt GitHub :
-    ```bash
-    git clone https://github.com/leadertgn/agrisense-partie-iot.git
-    cd agrisense-partie-iot
-    ```
-3.  **Créer le fichier `secrets.h`**: Dans le dossier `src`, créez un nouveau fichier nommé `secrets.h` et ajoutez-y vos identifiants Wi-Fi et Firebase. Remplacez les valeurs d'exemple par les vôtres :
+1.  **Configuration de l'IDE**: Assurez-vous d'avoir PlatformIO installé dans votre éditeur de code (VS Code recommandé) ou l'IDE Arduino avec le support ESP8266.
+2.  **Installation des Bibliothèques**:
+    *   **PlatformIO**: Ajoutez les bibliothèques spécifiées dans `platformio.ini` à votre fichier `lib_deps`. La bibliothèque principale est `Firebase Arduino Client Library for ESP8266 and ESP32`. Les autres (`time_utils.h`, `secrets.h`, `Array_Utils.h`) doivent être ajoutées manuellement dans le dossier `src/` ou `include/` du projet.
+    *   **Arduino IDE**: Installez les bibliothèques via le Gestionnaire de Bibliothèques :
+        *   "Firebase Arduino Client Library for ESP8266 and ESP32" par mobitar.
+        *   "DHT sensor library" par Adafruit.
+        *   "ESP8266WiFi" (généralement inclus avec le package ESP8266).
+        *   Les fichiers `time_utils.h`, `secrets.h`, `Array_Utils.h` doivent être placés dans le même répertoire que le fichier `.ino` ou dans un sous-dossier `src/`.
+3.  **Configuration des Identifiants**: Modifiez le fichier `secrets.h` (à créer s'il n'existe pas) pour y inclure vos informations de connexion WiFi et Firebase :
     ```cpp
+    // secrets.h
     #ifndef SECRETS_H
     #define SECRETS_H
 
-    #define WIFI_SSID "Votre_SSID_WiFi"
-    #define WIFI_PASSWORD "Votre_MotDePasse_WiFi"
+    // WiFi
+    const char* WIFI_SSID = "VOTRE_SSID_WIFI";
+    const char* WIFI_PASSWORD = "VOTRE_MOT_DE_PASSE_WIFI";
 
-    #define API_KEY "Votre_Cle_API_Firebase"
-    #define DATABASE_URL "https://votre-projet-firebase.firebaseio.com/" // URL de votre Realtime Database
-    #define USER_EMAIL "votre_email@example.com"
-    #define USER_PASSWORD "Votre_MotDePasse_Firebase"
+    // Firebase
+    const char* API_KEY = "VOTRE_API_KEY";
+    const char* DATABASE_URL = "VOTRE_DATABASE_URL"; // Ex: "https://votre-projet-id.firebaseio.com/"
+    const char* USER_EMAIL = "VOTRE_EMAIL_FIREBASE";
+    const char* USER_PASSWORD = "VOTRE_MOT_DE_PASSE_FIREBASE";
 
     #endif
     ```
-4.  **Vérifier les dépendances**: Le fichier `platformio.ini` spécifie les bibliothèques nécessaires. PlatformIO les installera automatiquement lors de la première compilation.
-    ```ini
-    lib_deps =
-      Firebase Arduino Client Library for ESP8266 and ESP32@4.4.17
-    ```
-5.  **Compiler et Téléverser**: Connectez votre carte ESP8266 à votre ordinateur via USB. Dans VS Code, utilisez les boutons de PlatformIO (coche pour compiler, flèche pour téléverser) pour compiler le code et le téléverser sur votre ESP8266.
+4.  **Compilation et Upload**:
+    *   **PlatformIO**: Ouvrez le projet dans VS Code, sélectionnez l'environnement `esp12e` et cliquez sur le bouton "Upload".
+    *   **Arduino IDE**: Sélectionnez la bonne carte (NodeMCU 1.0 ou ESP-12E Module) et le port COM approprié, puis cliquez sur le bouton "Upload".
 
 ## 8. Tests et Dépannage
-Voici des points de contrôle et des solutions pour les problèmes potentiels :
 
-*   **Bugs Hardware Détectés :**
-    1.  **Critique - Type de Capteur DHT**: Le code définit `DHT_TYPE DHT11` mais la liste des composants détectés mentionne un `DHT22`.
-        *   **Solution**: Si un capteur DHT22 est réellement utilisé, modifiez la ligne `#define DHT_TYPE DHT11` en `#define DHT_TYPE DHT22` dans `src/main.cpp` pour assurer des lectures précises.
-    2.  **Avertissement - Logique du Relais**: Le relais est initialisé avec `digitalWrite(RELAY_PIN, HIGH);` pour le fermer par défaut. Cela suppose un module relais "actif à l'état bas" (où un signal LOW active le relais et HIGH le désactive).
-        *   **Solution**: Vérifiez le type de votre module relais. Si c'est un module "actif à l'état haut", vous devrez inverser la logique dans le code (par exemple, `digitalWrite(RELAY_PIN, LOW);` pour fermer par défaut, et inverser les `LOW`/`HIGH` dans `handleRelayStateChange()`).
-    3.  **Avertissement - Durée de Vie du Capteur d'Humidité du Sol**: Les capteurs d'humidité du sol résistifs analogiques ont une durée de vie limitée lorsqu'ils sont alimentés en continu dans un environnement humide.
-        *   **Solution**: Pour prolonger la durée de vie du capteur, il est fortement recommandé de ne l'alimenter que pendant la lecture. Connectez la broche VCC du capteur à une broche GPIO numérique de l'ESP8266 (par exemple, D4), et activez cette broche (`digitalWrite(D4, HIGH);`) juste avant de lire le capteur, puis désactivez-la (`digitalWrite(D4, LOW);`) après la lecture.
+*   **Shopping List**:
+    *   ESP8266 (module ESP-12E)
+    *   Capteur DHT22 (détecté, bien que le code spécifie DHT11)
+    *   Module Relais 5V
+    *   Capteur d'humidité du sol (type analogique)
+    *   Alimentation pour l'ESP8266 et les modules.
+    *   Fils de connexion.
 
-*   **Points de contrôle généraux :**
-    *   **Connexion Série**: Ouvrez le moniteur série de PlatformIO (à 115200 bauds) pour visualiser les messages de débogage. Ils fournissent des informations cruciales sur l'état du Wi-Fi, de Firebase et des capteurs.
-    *   **Fichier `secrets.h`**: Assurez-vous que toutes les informations (SSID, mot de passe Wi-Fi, clé API, URL de la base de données, e-mail et mot de passe utilisateur Firebase) sont correctement renseignées et correspondent à votre configuration Firebase.
-    *   **Connexion Wi-Fi**: Vérifiez que l'ESP8266 se connecte correctement à votre réseau Wi-Fi. Les messages du moniteur série indiqueront l'état de la connexion et l'adresse IP attribuée.
-    *   **Règles de Sécurité Firebase**: Assurez-vous que les règles de sécurité de votre base de données Firebase Realtime Database permettent la lecture et l'écriture pour les chemins `/dernieres_mesures` et `/historiques`.
-    *   **Câblage**: Vérifiez toutes les connexions physiques des capteurs et du relais à l'ESP8266. Des erreurs de câblage sont une cause fréquente de problèmes.
+*   **Points de Contrôle Hardware**:
+    *   Vérifiez que le capteur DHT est correctement câblé (VCC, GND, Data vers GPIO12).
+    *   Assurez-vous que le capteur d'humidité du sol est connecté à A0 et GND/VCC.
+    *   Confirmez que le module relais est alimenté et que son signal d'entrée est connecté à GPIO14. La charge connectée au relais doit être compatible avec sa capacité.
 
-## 9. Shopping List
-Pour réaliser ce projet, vous aurez besoin des composants suivants :
+*   **Vérifications Serial Monitor**:
+    *   Surveillez la sortie du `Serial Monitor` (configuré à 115200 bauds) pendant le démarrage pour observer les étapes de connexion WiFi et Firebase.
+    *   Recherchez les messages "[DEBUG]" pour suivre le flux d'exécution et les valeurs des capteurs.
+    *   Notez toute erreur signalée par Firebase (`fbdo.errorReason()`) ou lors de la lecture du stream.
 
-*   **ESP8266** (par exemple, une carte NodeMCU ESP-12E)
-*   **Capteur DHT11** (ou DHT22, en ajustant le code si nécessaire)
-*   **Capteur d'humidité du sol analogique**
-*   **Module relais 5V** (vérifiez la logique d'activation - actif à l'état bas ou haut)
+*   **Erreurs Courantes et Solutions**:
+    *   **Bug Critique**: Le code spécifie `DHT_TYPE DHT11` mais le composant détecté est un `DHT22`. Bien que souvent compatibles, les lectures peuvent être moins précises.
+        *   **Solution**: Changez `#define DHT_TYPE DHT11` en `#define DHT_TYPE DHT22` dans `src/main.cpp` pour une meilleure précision.
+    *   **Avertissement**: Le code utilise `digitalWrite(RELAY_PIN, RELAY_STATE ? LOW : HIGH);`. Cela signifie que `RELAY_STATE = true` (logique) correspond à `LOW` (électrique), activant le relais. L'état initial est `HIGH` (inactif). Si l'électrovanne doit être ouverte par défaut, cette logique est correcte, mais il faut être conscient que `true` signifie "ouvert" et `false` signifie "fermé".
+        *   **Solution**: Documentez clairement cette inversion logique dans l'interface utilisateur ou le système de contrôle Firebase.
+    *   **Avertissement**: La fonction `readMeasures` utilise `map(constrain(soil_moisture_raw, 0, 1023), 0, 1023, 0, 100);`. La plage de lecture `analogRead` sur ESP8266 est généralement de 0 à 1023. Cependant, la calibration du capteur d'humidité du sol peut nécessiter des valeurs minimales et maximales différentes de 0 et 1023 pour représenter respectivement le sol complètement sec et complètement saturé.
+        *   **Solution**: Calibrez le capteur en mesurant les valeurs dans un sol sec et un sol saturé, puis ajustez les bornes de la fonction `map` en conséquence. Par exemple : `map(constrain(soil_moisture_raw, 200, 800), 200, 800, 0, 100);` après avoir déterminé les valeurs min/max réelles.
+    *   **Perte de connexion WiFi/Firebase**: Si l'appareil perd la connexion, il tente de la rétablir. Vérifiez les logs pour les échecs de connexion. Assurez-vous que les identifiants WiFi et Firebase dans `secrets.h` sont corrects et que le réseau est accessible.
+    *   **Problèmes de Stream Firebase**: Si le stream ne fonctionne pas, vérifiez la configuration Firebase (URL, clés API), l'authentification utilisateur, et assurez-vous que le chemin `/cultures/dernieres_mesures` ou `/test_data/dernieres_mesures` existe dans votre base de données. Le redémarrage périodique du stream (`checkStreamConnection`) aide à maintenir la connexion active. Les erreurs HTTP 401/403 lors de la lecture du stream indiquent souvent un problème de token d'authentification expiré ou invalide, nécessitant une réinitialisation de la connexion Firebase.
